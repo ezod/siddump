@@ -80,6 +80,7 @@ int main(int argc, char **argv)
   int counter = 0;
   int basefreq = 0;
   int basenote = 0xb0;
+  int binary = 0;
   int lowres = 0;
   int rows = 0;
   int oldnotefactor = 1;
@@ -111,6 +112,10 @@ int main(int argc, char **argv)
 
         case 'A':
         sscanf(&argv[c][2], "%u", &subtune);
+        break;
+
+        case 'B':
+        binary = 1;
         break;
 
         case 'C':
@@ -175,6 +180,7 @@ int main(int argc, char **argv)
            "Warning: CPU emulation may be buggy/inaccurate, illegals support very limited\n\n"
            "Options:\n"
            "-a<value> Accumulator value on init (subtune number) default = 0\n"
+           "-b        Dump binary register data to stdout\n"
            "-c<value> Frequency recalibration. Give note frequency in hex\n"
            "-d<value> Select calibration note (abs.notation 80-DF). Default middle-C (B0)\n"
            "-f<value> First frame to display, default 0\n"
@@ -294,18 +300,22 @@ int main(int argc, char **argv)
   memset(&prevfilt, 0, sizeof prevfilt);
   fprintf(stderr, "Calling playroutine for %d frames, starting from frame %d\n", seconds*50, firstframe);
   fprintf(stderr, "Middle C frequency is $%04X\n\n", freqtbllo[48] | (freqtblhi[48] << 8));
-  printf("| Frame | Freq Note/Abs WF ADSR Pul | Freq Note/Abs WF ADSR Pul | Freq Note/Abs WF ADSR Pul | FCut RC Typ V |");
-  if (profiling)
-  { // CPU cycles, Raster lines, Raster lines with badlines on every 8th line, first line included
-    printf(" Cycl RL RB |");
-  }
-  printf("\n");
-  printf("+-------+---------------------------+---------------------------+---------------------------+---------------+");
-  if (profiling)
+
+  if (!binary)
   {
-    printf("------------+");
+    printf("| Frame | Freq Note/Abs WF ADSR Pul | Freq Note/Abs WF ADSR Pul | Freq Note/Abs WF ADSR Pul | FCut RC Typ V |");
+    if (profiling)
+    { // CPU cycles, Raster lines, Raster lines with badlines on every 8th line, first line included
+      printf(" Cycl RL RB |");
+    }
+    printf("\n");
+    printf("+-------+---------------------------+---------------------------+---------------------------+---------------+");
+    if (profiling)
+    {
+      printf("------------+");
+    }
+    printf("\n");
   }
-  printf("\n");
 
   // Data collection & display loop
   while (frames < firstframe + seconds*50)
@@ -328,176 +338,184 @@ int main(int argc, char **argv)
         break;
     }
 
-    // Get SID parameters from each channel and the filter
-    for (c = 0; c < 3; c++)
+    if (binary)
     {
-      chn[c].freq = mem[0xd400 + 7*c] | (mem[0xd401 + 7*c] << 8);
-      chn[c].pulse = (mem[0xd402 + 7*c] | (mem[0xd403 + 7*c] << 8)) & 0xfff;
-      chn[c].wave = mem[0xd404 + 7*c];
-      chn[c].adsr = mem[0xd406 + 7*c] | (mem[0xd405 + 7*c] << 8);
+      fwrite(&mem[0xd400], 1, 25, stdout);
     }
-    filt.cutoff = (mem[0xd415] << 5) | (mem[0xd416] << 8);
-    filt.ctrl = mem[0xd417];
-    filt.type = mem[0xd418];
-
-    // Frame display
-    if (frames >= firstframe)
+    else
     {
-      char output[512];
-      int time = frames - firstframe;
-      output[0] = 0;      
-
-      if (!timeseconds)
-        sprintf(&output[strlen(output)], "| %5d | ", time);
-      else
-        sprintf(&output[strlen(output)], "|%01d:%02d.%02d| ", time/3000, (time/50)%60, time%50);
-
-      // Loop for each channel
+      // Get SID parameters from each channel and the filter
       for (c = 0; c < 3; c++)
       {
-        int newnote = 0;
-
-        // Keyoff-keyon sequence detection
-        if (chn[c].wave >= 0x10)
-        {
-          if ((chn[c].wave & 1) && ((!(prevchn2[c].wave & 1)) || (prevchn2[c].wave < 0x10)))
-            prevchn[c].note = -1;
-        }
-
-        // Frequency
-        if ((frames == firstframe) || (prevchn[c].note == -1) || (chn[c].freq != prevchn[c].freq))
-        {
-          int d;
-          int dist = 0x7fffffff;
-          int delta = ((int)chn[c].freq) - ((int)prevchn2[c].freq);
-
-          sprintf(&output[strlen(output)], "%04X ", chn[c].freq);
-
-          if (chn[c].wave >= 0x10)
-          {
-            // Get new note number
-            for (d = 0; d < 96; d++)
-            {
-              int cmpfreq = freqtbllo[d] | (freqtblhi[d] << 8);
-              int freq = chn[c].freq;
-
-              if (abs(freq - cmpfreq) < dist)
-              {
-                dist = abs(freq - cmpfreq);
-                // Favor the old note
-                if (d == prevchn[c].note) dist /= oldnotefactor;
-                 chn[c].note = d;
-              }
-            }
-
-            // Print new note
-            if (chn[c].note != prevchn[c].note)
-            {
-              if (prevchn[c].note == -1)
-               {
-                 if (lowres) newnote = 1;
-                 sprintf(&output[strlen(output)], " %s %02X  ", notename[chn[c].note], chn[c].note | 0x80);
-              }
-               else
-                sprintf(&output[strlen(output)], "(%s %02X) ", notename[chn[c].note], chn[c].note | 0x80);
-            }
-            else
-            {
-              // If same note, print frequency change (slide/vibrato)
-              if (delta)
-              {
-                if (delta > 0)
-                   sprintf(&output[strlen(output)], "(+ %04X) ", delta);
-                 else
-                   sprintf(&output[strlen(output)], "(- %04X) ", -delta);
-              }
-              else sprintf(&output[strlen(output)], " ... ..  ");
-            }
-          }
-          else sprintf(&output[strlen(output)], " ... ..  ");
-        }
-        else sprintf(&output[strlen(output)], "....  ... ..  ");
-
-        // Waveform
-        if ((frames == firstframe) || (newnote) || (chn[c].wave != prevchn[c].wave))
-          sprintf(&output[strlen(output)], "%02X ", chn[c].wave);
-        else sprintf(&output[strlen(output)], ".. ");
-
-        // ADSR
-        if ((frames == firstframe) || (newnote) || (chn[c].adsr != prevchn[c].adsr)) sprintf(&output[strlen(output)], "%04X ", chn[c].adsr);
-        else sprintf(&output[strlen(output)], ".... ");
-
-        // Pulse
-        if ((frames == firstframe) || (newnote) || (chn[c].pulse != prevchn[c].pulse)) sprintf(&output[strlen(output)], "%03X ", chn[c].pulse);
-        else sprintf(&output[strlen(output)], "... ");
-
-        sprintf(&output[strlen(output)], "| ");
+        chn[c].freq = mem[0xd400 + 7*c] | (mem[0xd401 + 7*c] << 8);
+        chn[c].pulse = (mem[0xd402 + 7*c] | (mem[0xd403 + 7*c] << 8)) & 0xfff;
+        chn[c].wave = mem[0xd404 + 7*c];
+        chn[c].adsr = mem[0xd406 + 7*c] | (mem[0xd405 + 7*c] << 8);
       }
+      filt.cutoff = (mem[0xd415] << 5) | (mem[0xd416] << 8);
+      filt.ctrl = mem[0xd417];
+      filt.type = mem[0xd418];
 
-      // Filter cutoff
-      if ((frames == firstframe) || (filt.cutoff != prevfilt.cutoff)) sprintf(&output[strlen(output)], "%04X ", filt.cutoff);
-      else sprintf(&output[strlen(output)], ".... ");
-
-      // Filter control
-      if ((frames == firstframe) || (filt.ctrl != prevfilt.ctrl))
-        sprintf(&output[strlen(output)], "%02X ", filt.ctrl);
-      else sprintf(&output[strlen(output)], ".. ");
-
-      // Filter passband
-      if ((frames == firstframe) || ((filt.type & 0x70) != (prevfilt.type & 0x70)))
-        sprintf(&output[strlen(output)], "%s ", filtername[(filt.type >> 4) & 0x7]);
-      else sprintf(&output[strlen(output)], "... ");
-
-      // Mastervolume
-      if ((frames == firstframe) || ((filt.type & 0xf) != (prevfilt.type & 0xf))) sprintf(&output[strlen(output)], "%01X ", filt.type & 0xf);
-      else sprintf(&output[strlen(output)], ". ");
-      
-      // Rasterlines / cycle count
-      if (profiling)
+      // Frame display
+      if (frames >= firstframe)
       {
-        int cycles = cpucycles;
-        int rasterlines = (cycles + 62) / 63;
-        int badlines = ((cycles + 503) / 504);
-        int rasterlinesbad = (badlines * 40 + cycles + 62) / 63;
-        sprintf(&output[strlen(output)], "| %4d %02X %02X ", cycles, rasterlines, rasterlinesbad);
-      }
-      
-      // End of frame display, print info so far and copy SID registers to old registers
-      sprintf(&output[strlen(output)], "|\n");
-      if ((!lowres) || (!((frames - firstframe) % spacing[tempoindex])))
-      {
-        printf("%s", output);
+        char output[512];
+        int time = frames - firstframe;
+        output[0] = 0;
+
+        if (!timeseconds)
+          sprintf(&output[strlen(output)], "| %5d | ", time);
+        else
+          sprintf(&output[strlen(output)], "|%01d:%02d.%02d| ", time/3000, (time/50)%60, time%50);
+
+        // Loop for each channel
         for (c = 0; c < 3; c++)
         {
-          prevchn[c] = chn[c];
-        }
-        prevfilt = filt;
-      }
-      for (c = 0; c < 3; c++) prevchn2[c] = chn[c];
+          int newnote = 0;
 
-      // Print note/pattern separators
-      if (spacing[tempoindex])
-      {
-        counter++;
-        if (counter >= spacing[tempoindex])
-        {
-          tempoindex ^= 1;
-          counter = 0;
-          if (pattspacing)
+          // Keyoff-keyon sequence detection
+          if (chn[c].wave >= 0x10)
           {
-            rows++;
-            if (rows >= pattspacing)
+            if ((chn[c].wave & 1) && ((!(prevchn2[c].wave & 1)) || (prevchn2[c].wave < 0x10)))
+              prevchn[c].note = -1;
+          }
+
+          // Frequency
+          if ((frames == firstframe) || (prevchn[c].note == -1) || (chn[c].freq != prevchn[c].freq))
+          {
+            int d;
+            int dist = 0x7fffffff;
+            int delta = ((int)chn[c].freq) - ((int)prevchn2[c].freq);
+
+            sprintf(&output[strlen(output)], "%04X ", chn[c].freq);
+
+            if (chn[c].wave >= 0x10)
             {
-              rows = 0;
-              printf("+=======+===========================+===========================+===========================+===============+\n");
+              // Get new note number
+              for (d = 0; d < 96; d++)
+              {
+                int cmpfreq = freqtbllo[d] | (freqtblhi[d] << 8);
+                int freq = chn[c].freq;
+
+                if (abs(freq - cmpfreq) < dist)
+                {
+                  dist = abs(freq - cmpfreq);
+                  // Favor the old note
+                  if (d == prevchn[c].note) dist /= oldnotefactor;
+                   chn[c].note = d;
+                }
+              }
+
+              // Print new note
+              if (chn[c].note != prevchn[c].note)
+              {
+                if (prevchn[c].note == -1)
+                 {
+                   if (lowres) newnote = 1;
+                   sprintf(&output[strlen(output)], " %s %02X  ", notename[chn[c].note], chn[c].note | 0x80);
+                }
+                 else
+                  sprintf(&output[strlen(output)], "(%s %02X) ", notename[chn[c].note], chn[c].note | 0x80);
+              }
+              else
+              {
+                // If same note, print frequency change (slide/vibrato)
+                if (delta)
+                {
+                  if (delta > 0)
+                     sprintf(&output[strlen(output)], "(+ %04X) ", delta);
+                   else
+                     sprintf(&output[strlen(output)], "(- %04X) ", -delta);
+                }
+                else sprintf(&output[strlen(output)], " ... ..  ");
+              }
+            }
+            else sprintf(&output[strlen(output)], " ... ..  ");
+          }
+          else sprintf(&output[strlen(output)], "....  ... ..  ");
+
+          // Waveform
+          if ((frames == firstframe) || (newnote) || (chn[c].wave != prevchn[c].wave))
+            sprintf(&output[strlen(output)], "%02X ", chn[c].wave);
+          else sprintf(&output[strlen(output)], ".. ");
+
+          // ADSR
+          if ((frames == firstframe) || (newnote) || (chn[c].adsr != prevchn[c].adsr)) sprintf(&output[strlen(output)], "%04X ", chn[c].adsr);
+          else sprintf(&output[strlen(output)], ".... ");
+
+          // Pulse
+          if ((frames == firstframe) || (newnote) || (chn[c].pulse != prevchn[c].pulse)) sprintf(&output[strlen(output)], "%03X ", chn[c].pulse);
+          else sprintf(&output[strlen(output)], "... ");
+
+          sprintf(&output[strlen(output)], "| ");
+        }
+
+        // Filter cutoff
+        if ((frames == firstframe) || (filt.cutoff != prevfilt.cutoff)) sprintf(&output[strlen(output)], "%04X ", filt.cutoff);
+        else sprintf(&output[strlen(output)], ".... ");
+
+        // Filter control
+        if ((frames == firstframe) || (filt.ctrl != prevfilt.ctrl))
+          sprintf(&output[strlen(output)], "%02X ", filt.ctrl);
+        else sprintf(&output[strlen(output)], ".. ");
+
+        // Filter passband
+        if ((frames == firstframe) || ((filt.type & 0x70) != (prevfilt.type & 0x70)))
+          sprintf(&output[strlen(output)], "%s ", filtername[(filt.type >> 4) & 0x7]);
+        else sprintf(&output[strlen(output)], "... ");
+
+        // Mastervolume
+        if ((frames == firstframe) || ((filt.type & 0xf) != (prevfilt.type & 0xf))) sprintf(&output[strlen(output)], "%01X ", filt.type & 0xf);
+        else sprintf(&output[strlen(output)], ". ");
+
+        // Rasterlines / cycle count
+        if (profiling)
+        {
+          int cycles = cpucycles;
+          int rasterlines = (cycles + 62) / 63;
+          int badlines = ((cycles + 503) / 504);
+          int rasterlinesbad = (badlines * 40 + cycles + 62) / 63;
+          sprintf(&output[strlen(output)], "| %4d %02X %02X ", cycles, rasterlines, rasterlinesbad);
+        }
+
+        // End of frame display, print info so far and copy SID registers to old registers
+        sprintf(&output[strlen(output)], "|\n");
+        if ((!lowres) || (!((frames - firstframe) % spacing[tempoindex])))
+        {
+          printf("%s", output);
+          for (c = 0; c < 3; c++)
+          {
+            prevchn[c] = chn[c];
+          }
+          prevfilt = filt;
+        }
+        for (c = 0; c < 3; c++) prevchn2[c] = chn[c];
+
+        // Print note/pattern separators
+        if (spacing[tempoindex])
+        {
+          counter++;
+          if (counter >= spacing[tempoindex])
+          {
+            tempoindex ^= 1;
+            counter = 0;
+            if (pattspacing)
+            {
+              rows++;
+              if (rows >= pattspacing)
+              {
+                rows = 0;
+                printf("+=======+===========================+===========================+===========================+===============+\n");
+              }
+              else
+                if (!lowres) printf("+-------+---------------------------+---------------------------+---------------------------+---------------+\n");
             }
             else
               if (!lowres) printf("+-------+---------------------------+---------------------------+---------------------------+---------------+\n");
           }
-          else
-            if (!lowres) printf("+-------+---------------------------+---------------------------+---------------------------+---------------+\n");
         }
       }
+
     }
 
     // Advance to next frame
