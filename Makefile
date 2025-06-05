@@ -1,8 +1,11 @@
 CC=gcc
 CXX=g++
-CFLAGS+=-O3 -Wall
+CFLAGS+=-O3 -Wall -Wno-unused-result
 CXXFLAGS=$(CFLAGS)
 
-siddump.exe: siddump.o cpu.o
+siddump: siddump.o cpu.o
 	gcc -o $@ $^ -lm
 	strip $@
+
+clean:
+	rm -f siddump *.o
