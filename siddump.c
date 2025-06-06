@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,6 +7,12 @@
 #include "cpu.h"
 
 #define MAX_INSTR 0x100000
+
+#define NUM_REGS 25
+#define NUM_GROUPS 15
+
+const uint8_t group_lengths[] = {2,2,1,2,2,2,1,2,2,2,1,2,2,1,1};
+uint8_t mem_prev[NUM_REGS];
 
 typedef struct
 {
@@ -180,7 +187,7 @@ int main(int argc, char **argv)
            "Warning: CPU emulation may be buggy/inaccurate, illegals support very limited\n\n"
            "Options:\n"
            "-a<value> Accumulator value on init (subtune number) default = 0\n"
-           "-b        Dump binary register data to stdout\n"
+           "-b        Dump compressed binary register data to stdout\n"
            "-c<value> Frequency recalibration. Give note frequency in hex\n"
            "-d<value> Select calibration note (abs.notation 80-DF). Default middle-C (B0)\n"
            "-f<value> First frame to display, default 0\n"
@@ -317,6 +324,8 @@ int main(int argc, char **argv)
     printf("\n");
   }
 
+  memset(mem_prev, 0, sizeof(mem_prev));
+
   // Data collection & display loop
   while (frames < firstframe + seconds*50)
   {
@@ -340,7 +349,37 @@ int main(int argc, char **argv)
 
     if (binary)
     {
-      fwrite(&mem[0xd400], 1, 25, stdout);
+      // bitfield for changed registers
+      uint16_t bitfield = 0;
+      uint8_t output[NUM_REGS + 2];
+      int out_idx = 2;
+
+      for (int i = 0; i < NUM_GROUPS; ++i)
+      {
+        // calculate start
+        int start = 0;
+        for (int j = 0; j < i; ++j)
+        {
+          start += group_lengths[j];
+        }
+
+        if (memcmp(&mem[0xd400 + start], &mem_prev[start], group_lengths[i]))
+        {
+          // mark group as changed
+          bitfield |= (1 << i);
+
+          // copy new values to output and update mem_prev
+          memcpy(&output[out_idx], &mem[0xd400 + start], group_lengths[i]);
+          memcpy(&mem_prev[start], &mem[0xd400 + start], group_lengths[i]);
+          out_idx += group_lengths[i];
+        }
+      }
+
+      // write bitfield (little-endian)
+      output[0] = bitfield & 0xFF;
+      output[1] = bitfield >> 8;
+
+      fwrite(output, 1, out_idx, stdout);
     }
     else
     {
