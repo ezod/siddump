@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include "cpu.h"
 
 #define FN 0x80
 #define FV 0x40
@@ -31,6 +32,7 @@
 #define WRITE(address)                  \
 {                                       \
   /* cpuwritemap[(address) >> 6] = 1; */  \
+  cpuwrite(address);                    \
 }
 
 #define EVALPAGECROSSING(baseaddr, realaddr) ((((baseaddr) ^ (realaddr)) & 0xff00) ? 1 : 0)
@@ -462,21 +464,25 @@ int runcpu(void)
 
     case 0x06:
     ASL(MEM(ZEROPAGE()));
+    WRITE(ZEROPAGE());
     pc++;
     break;
 
     case 0x16:
     ASL(MEM(ZEROPAGEX()));
+    WRITE(ZEROPAGEX());
     pc++;
     break;
 
     case 0x0e:
     ASL(MEM(ABSOLUTE()));
+    WRITE(ABSOLUTE());
     pc += 2;
     break;
 
     case 0x1e:
     ASL(MEM(ABSOLUTEX()));
+    WRITE(ABSOLUTEX());
     pc += 2;
     break;
 

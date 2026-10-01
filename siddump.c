@@ -10,9 +10,17 @@
 
 #define NUM_REGS 25
 #define NUM_GROUPS 15
+#define NUM_VOICES 3
+#define RETRIG_FLAG 0x8000
 
 const uint8_t group_lengths[] = {2,2,1,2,2,2,1,2,2,2,1,2,2,1,1};
+const int control_groups[NUM_VOICES] = {2,6,10};
 uint8_t mem_prev[NUM_REGS];
+
+// Gate tracking for the current playroutine call: 0 = no gate-off seen,
+// 1 = gate-off seen, 2 = gate-off followed by gate-on (a retrigger that a
+// once-per-frame register snapshot cannot see)
+int gatestate[NUM_VOICES];
 
 typedef struct
 {
@@ -75,9 +83,28 @@ unsigned char freqtblhi[] = {
   0x45,0x49,0x4e,0x52,0x57,0x5c,0x62,0x68,0x6e,0x75,0x7c,0x83,
   0x8b,0x93,0x9c,0xa5,0xaf,0xb9,0xc4,0xd0,0xdd,0xea,0xf8,0xff};
 
+void cpuwrite(unsigned short address)
+{
+  int c;
+
+  for (c = 0; c < NUM_VOICES; c++)
+  {
+    if (address == 0xd404 + 7*c)
+    {
+      if (!(mem[address] & 1))
+        gatestate[c] = 1;
+      else if (gatestate[c])
+        gatestate[c] = 2;
+    }
+  }
+}
+
 int main(int argc, char **argv)
 {
-  int subtune = 0;
+  int subtune = -1;
+  int rsid;
+  unsigned startsong;
+  unsigned speed;
   int seconds = 60;
   int instr = 0;
   int frames = 0;
@@ -102,6 +129,9 @@ int main(int argc, char **argv)
   unsigned initaddress;
   unsigned playaddress;
   unsigned dataoffset;
+  char title[33];
+  char author[33];
+  char released[33];
   FILE *in;
   char *sidname = 0;
   int c;
@@ -186,7 +216,8 @@ int main(int argc, char **argv)
     fprintf(stderr, "Usage: SIDDUMP <sidfile> [options]\n"
            "Warning: CPU emulation may be buggy/inaccurate, illegals support very limited\n\n"
            "Options:\n"
-           "-a<value> Accumulator value on init (subtune number) default = 0\n"
+           "-a<value> Accumulator value on init (subtune number) default = start song\n"
+           "          from the SID header, minus 1\n"
            "-b        Dump compressed binary register data to stdout\n"
            "-c<value> Frequency recalibration. Give note frequency in hex\n"
            "-d<value> Select calibration note (abs.notation 80-DF). Default middle-C (B0)\n"
@@ -242,11 +273,26 @@ int main(int argc, char **argv)
   }
 
   // Read interesting parts of the SID header
+  rsid = readbyte(in) == 'R';
   fseek(in, 6, SEEK_SET);
   dataoffset = readword(in);
   loadaddress = readword(in);
   initaddress = readword(in);
   playaddress = readword(in);
+  readword(in);
+  startsong = readword(in);
+  speed = readword(in) << 16;
+  speed |= readword(in);
+  if (subtune < 0)
+    subtune = startsong ? startsong - 1 : 0;
+
+  // Read title, author, and released info
+  fseek(in, 22, SEEK_SET);
+  fread(title, 1, 32, in);
+  fread(author, 1, 32, in);
+  fread(released, 1, 32, in);
+  title[32] = author[32] = released[32] = '\0';
+
   fseek(in, dataoffset, SEEK_SET);
   if (loadaddress == 0)
     loadaddress = readbyte(in) | (readbyte(in) << 8);
@@ -267,6 +313,8 @@ int main(int argc, char **argv)
   fclose(in);
 
   // Print info & run initroutine
+  if (rsid)
+    fprintf(stderr, "Warning: RSID file requires real C64 environment, dump may be incorrect\n");
   fprintf(stderr, "Load address: $%04X Init address: $%04X Play address: $%04X\n", loadaddress, initaddress, playaddress);
   fprintf(stderr, "Calling initroutine with subtune %d\n", subtune);
   mem[0x01] = 0x37;
@@ -289,6 +337,15 @@ int main(int argc, char **argv)
     }
   }
 
+  if ((speed >> (subtune < 31 ? subtune : 31)) & 1)
+  {
+    unsigned timer = mem[0xdc04] | (mem[0xdc05] << 8);
+    if (timer)
+      fprintf(stderr, "Warning: subtune uses CIA timing at %.1f Hz (PAL), but dump is at 50 Hz\n", 985248.0 / (timer + 1));
+    else
+      fprintf(stderr, "Warning: subtune uses CIA timing (default 60 Hz), but dump is at 50 Hz\n");
+  }
+
   if (playaddress == 0)
   {
     fprintf(stderr, "Warning: SID has play address 0, reading from interrupt vector instead\n");
@@ -308,8 +365,17 @@ int main(int argc, char **argv)
   fprintf(stderr, "Calling playroutine for %d frames, starting from frame %d\n", seconds*50, firstframe);
   fprintf(stderr, "Middle C frequency is $%04X\n\n", freqtbllo[48] | (freqtblhi[48] << 8));
 
-  if (!binary)
+  if (binary)
   {
+    fwrite(title, 1, 32, stdout);
+    fwrite(author, 1, 32, stdout);
+    fwrite(released, 1, 32, stdout);
+  }
+  else
+  {
+    printf("Title     : %s \n", title);
+    printf("Author    : %s \n", author);
+    printf("Released  : %s \n\n", released);
     printf("| Frame | Freq Note/Abs WF ADSR Pul | Freq Note/Abs WF ADSR Pul | Freq Note/Abs WF ADSR Pul | FCut RC Typ V |");
     if (profiling)
     { // CPU cycles, Raster lines, Raster lines with badlines on every 8th line, first line included
@@ -332,6 +398,7 @@ int main(int argc, char **argv)
     int c;
 
     // Run the playroutine
+    memset(gatestate, 0, sizeof gatestate);
     instr = 0;
     initcpu(playaddress, 0, 0, 0);
     while (runcpu())
@@ -351,8 +418,21 @@ int main(int argc, char **argv)
     {
       // bitfield for changed registers
       uint16_t bitfield = 0;
-      uint8_t output[NUM_REGS + 2];
+      uint8_t output[NUM_REGS + 3];
       int out_idx = 2;
+
+      // Voices whose gate went off and back on during this frame
+      uint8_t retrig = 0;
+      for (int v = 0; v < NUM_VOICES; ++v)
+      {
+        if (gatestate[v] == 2 && (mem[0xd404 + 7*v] & 1))
+          retrig |= 1 << v;
+      }
+      if (retrig)
+      {
+        bitfield |= RETRIG_FLAG;
+        output[out_idx++] = retrig;
+      }
 
       for (int i = 0; i < NUM_GROUPS; ++i)
       {
@@ -363,7 +443,14 @@ int main(int argc, char **argv)
           start += group_lengths[j];
         }
 
-        if (memcmp(&mem[0xd400 + start], &mem_prev[start], group_lengths[i]))
+        int force = 0;
+        for (int v = 0; v < NUM_VOICES; ++v)
+        {
+          if ((retrig & (1 << v)) && i == control_groups[v])
+            force = 1;
+        }
+
+        if (force || memcmp(&mem[0xd400 + start], &mem_prev[start], group_lengths[i]))
         {
           // mark group as changed
           bitfield |= (1 << i);
